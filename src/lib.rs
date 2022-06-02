@@ -1,126 +1,109 @@
-use std::collections::VecDeque;
+mod snake;
 
-use rand::prelude::*;
+use std::{cell::RefCell, rc::Rc};
 
-pub type Position = (usize, usize);
+use js_sys::Function;
+use snake::Direction;
+use snake::SnakeGame;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use web_sys::{console, window, HtmlElement, HtmlDivElement, KeyboardEvent};
 
-#[derive(Debug, PartialEq)]
-pub enum Direction {
-	Up,
-	Down,
-	Left,
-	Right,
+thread_local! {
+	static GAME: Rc<RefCell<SnakeGame>> = Rc::new(RefCell::new(SnakeGame::new(20, 15)));
+	static TICK_CLOSURE: Closure<dyn FnMut()> = Closure::wrap(Box::new({
+		let game = GAME.with(|game| game.clone());
+		move || {
+			game.borrow_mut().tick();
+			render();
+		}
+	}) as Box<dyn FnMut()>);
+
+	static HANDLE_KEYDOWN: Closure<dyn FnMut(KeyboardEvent)> = Closure::wrap(Box::new({
+		let game = GAME.with(|game| game.clone());
+		move |e: KeyboardEvent| {
+			let direction = match &e.key()[..] {
+				"ArrowUp" => Direction::Up,
+				"ArrowDown" => Direction::Down,
+				"ArrowRight" => Direction::Right,
+				"ArrowLeft" => Direction::Left,
+				_ => return
+			};
+
+			game.borrow_mut().change_direction(direction);
+		}
+	}))
 }
 
-#[derive(Debug)]
-pub struct SnakeGame {
-	width: usize,
-	height: usize,
-	snake: VecDeque<Position>,
-	snake_direction: Direction,
-	food: Position,
-	game_over: bool
+#[wasm_bindgen(start)]
+pub fn main() {
+	console::log_1(&"Staring...".into());
+
+	TICK_CLOSURE.with(|tick_closure| {
+		window()
+			.unwrap_throw()
+			.set_interval_with_callback_and_timeout_and_arguments_0(
+				tick_closure.as_ref().dyn_ref::<Function>().unwrap_throw(),
+				350
+			)
+			.unwrap_throw()
+	});
+
+	HANDLE_KEYDOWN.with(|handle_keydown| {
+		window()
+			.unwrap_throw()
+			.add_event_listener_with_callback(
+				"keydown",
+				handle_keydown.as_ref().dyn_ref::<Function>().unwrap_throw(),
+			)
+			.unwrap_throw();
+	});
+
+	render();
 }
 
-fn rand_position(width: usize, height: usize) -> Position {
-	let mut rng = thread_rng();
-	(rng.gen_range(0..width), rng.gen_range(0..height))
-}
+pub fn render() {
+	GAME.with(|game| {
+		let game = game.borrow();
+		let document = window()
+			.unwrap_throw()
+			.document()
+			.unwrap_throw();
 
-fn get_opposite_direction(direction: &Direction) -> Direction {
-	match direction {
-		Direction::Up => Direction::Down,
-		Direction::Down => Direction::Up,
-		Direction::Right => Direction::Left,
-		Direction::Left => Direction::Right,
-	}
-}
+		let root = document
+			.get_element_by_id("root")
+			.unwrap_throw()
+			.dyn_into::<HtmlElement>()
+			.unwrap_throw();
 
-impl SnakeGame {
-	pub fn new(width: usize, height: usize) -> SnakeGame {
-		Self {
-			width,
-			height,
-			snake: VecDeque::from([(width / 2, height / 2)]),
-			snake_direction: Direction::Left,
-			food: rand_position(width, height),
-			game_over: false
-		}
-	}
+		root.set_inner_html("");
+		root.style()
+			.set_property("display", "inline-grid")
+			.unwrap_throw();
+		root.style()
+			.set_property("grid-template", &format!("repeat({}, auto) / repeat({}, auto)", game.height, game.width))
+			.unwrap_throw();
 
-	pub fn change_direction(&mut self, direction: Direction) {
-		// Because you can't start going in the opposite direction you are
-		// currently going
-		if get_opposite_direction(&self.snake_direction) == direction {
-			return;
-		}
+		for y in 0..game.height {
+			for x in 0..game.width {
+				let pos = (x, y);
+				let elem = document.create_element("div").unwrap_throw().dyn_into::<HtmlDivElement>().unwrap_throw();
+				elem.set_class_name("field");
 
-		self.snake_direction = direction
-	}
+				let text = if pos == game.food {
+					"🍎"
+				} else if Some(&pos) == game.snake.front() {
+					"❇️"
+				} else if game.snake.contains(&pos) {
+					"🟩"
+				} else {
+					" "
+				};
 
-	fn is_valid_move(&self, (x, y): Position, dx: i32, dy: i32) -> bool {
-		let new_x = x as i32 + dx;
-		let new_y = y as i32 + dy;
-		0 <= new_x && new_x < self.width as i32 && 0 <= new_y && new_y < self.height as i32
-	}
+				elem.set_inner_text(text);
 
-	fn get_unoccupied_position(&self) -> Option<Position> {
-		let mut rng = thread_rng();
-		(0..self.height)
-			.flat_map(|y| (0..self.width).map(move |x| (x, y)))
-			.filter(|pos| !self.snake.contains(pos))
-			.choose(&mut rng)
-	}
-
-	pub fn tick(&mut self) {
-		if self.game_over {
-			return;
-		}
-
-		let head = self.snake.front();
-		if head.is_none() {
-			return;
-		}
-		let head = *head.unwrap();
-
-		let (dx, dy): (i32, i32) = match &self.snake_direction {
-			Direction::Up => (-1, 0),
-			Direction::Down => (1, 0),
-			Direction::Left => (-1, 0),
-			Direction::Right => (1, 0),
-		};
-
-		if !self.is_valid_move(head, dx, dy) {
-			self.game_over = true;
-			return;
-		}
-
-		let new_head = (
-			(head.0 as i32 + dx) as usize,
-			(head.1 as i32 + dy) as usize
-		);
-		self.snake.push_front(new_head);
-
-		if new_head == self.food {
-			let new_food = self.get_unoccupied_position();
-			if let Some(new_food) = new_food {
-				self.food = new_food;
-			} else {
-				self.game_over = true;
+				root.append_child(&elem).unwrap_throw();
 			}
-		} else {
-			self.snake.pop_back();
 		}
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-	#[test]
-	fn it_works() {
-		let game = SnakeGame::new(10, 10);
-
-		println!("{:?}", game);
-	}
+	})
 }
